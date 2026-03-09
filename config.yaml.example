@@ -1,0 +1,14 @@
+ssh:
+  host: ubuntu-server.example.com
+  port: 22
+  user: ubuntu
+  private_key: ~/.ssh/id_rsa
+
+sync:
+  local_dir: ./project
+  remote_dir: /home/ubuntu/project
+
+options:
+  use_hash: false
+  delete_protection: true
+
