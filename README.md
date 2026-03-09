@@ -4,6 +4,27 @@
 
 It supports pull, push, and two-way sync modes with incremental detection, optional SHA256 verification, resumable transfers, conflict resolution prompts, `.syncignore`, and dry-run planning output.
 
+## Requirements
+
+- Python 3.11+
+- `pip` (latest recommended)
+- Network access to the target SSH host/port
+- One SSH authentication method configured:
+  - private key, or
+  - password, or
+  - SSH agent
+- Dependencies from [`requirements.txt`](requirements.txt):
+  - `paramiko`
+  - `typer`
+  - `rich`
+  - `pyyaml`
+
+Optional (for remote hash verification with `--use-hash`):
+
+- `sha256sum`, or
+- `shasum`, or
+- `openssl`
+
 ## Features
 
 - SSH connection management with:

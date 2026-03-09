@@ -5,7 +5,7 @@ from __future__ import annotations
 import difflib
 import logging
 import posixpath
-import tempfile
+import shutil
 from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
 
@@ -122,8 +122,12 @@ class SyncEngine:
                 self.console.print(f"+ download {path.as_posix()}")
                 result.downloaded.append(path)
                 continue
-            download_file(self.connection, self.remote_dir, self.local_dir, path, dry_run=False)
-            result.downloaded.append(path)
+            try:
+                download_file(self.connection, self.remote_dir, self.local_dir, path, dry_run=False)
+                result.downloaded.append(path)
+            except OSError as exc:
+                LOGGER.error("Download failed for %s: %s", path.as_posix(), exc)
+                result.skipped.append(path)
 
     def _apply_uploads(self, items: list[PurePosixPath], result: SyncResult) -> None:
         """Apply planned uploads with dry-run support."""
@@ -132,8 +136,12 @@ class SyncEngine:
                 self.console.print(f"+ upload {path.as_posix()}")
                 result.uploaded.append(path)
                 continue
-            upload_file(self.connection, self.local_dir, self.remote_dir, path, dry_run=False)
-            result.uploaded.append(path)
+            try:
+                upload_file(self.connection, self.local_dir, self.remote_dir, path, dry_run=False)
+                result.uploaded.append(path)
+            except OSError as exc:
+                LOGGER.error("Upload failed for %s: %s", path.as_posix(), exc)
+                result.skipped.append(path)
 
     def _resolve_conflict(
         self,
@@ -174,13 +182,16 @@ class SyncEngine:
         remote_path = posixpath.join(self.remote_dir, relative_path.as_posix())
 
         try:
-            local_text = local_path.read_text(encoding="utf-8", errors="replace").splitlines()
+            with local_path.open("r", encoding="utf-8", errors="replace") as lf:
+                local_text = lf.readlines(200_000)
+            local_text = [line.rstrip("\n") for line in local_text]
         except OSError:
             local_text = ["<unable to read local text>"]
 
         try:
             with self.connection.sftp.open(remote_path, "r") as handle:
-                remote_text = handle.read().decode("utf-8", errors="replace").splitlines()
+                remote_data = handle.read(200_000)
+                remote_text = remote_data.decode("utf-8", errors="replace").splitlines()
         except OSError:
             remote_text = ["<unable to read remote text>"]
 
@@ -220,15 +231,9 @@ class SyncEngine:
         ensure_parent(remote_copy_local)
 
         if local_origin.exists():
-            local_copy.write_bytes(local_origin.read_bytes())
+            shutil.copy2(local_origin, local_copy)
 
-        with tempfile.NamedTemporaryFile(delete=False) as tmp:
-            temp_path = Path(tmp.name)
-
-        try:
-            self.connection.sftp.get(remote_origin, str(temp_path))
-            remote_copy_local.write_bytes(temp_path.read_bytes())
-        finally:
-            if temp_path.exists():
-                temp_path.unlink()
+        with self.connection.sftp.open(remote_origin, "rb") as src:
+            with remote_copy_local.open("wb") as dst:
+                shutil.copyfileobj(src, dst, length=1024 * 1024)
 

@@ -32,7 +32,7 @@ def sha256_file(path: Path, chunk_size: int = 1024 * 1024) -> str:
 
 def normalize_relative_path(path: Path, root: Path) -> PurePosixPath:
     """Normalize local path to a POSIX-style relative path."""
-    rel = path.resolve().relative_to(root.resolve())
+    rel = path.absolute().relative_to(root.absolute())
     return PurePosixPath(rel.as_posix())
 
 

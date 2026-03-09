@@ -40,24 +40,30 @@ class SSHConnection:
             return
 
         client = paramiko.SSHClient()
-        client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+        client.load_system_host_keys()
+        client.set_missing_host_key_policy(paramiko.RejectPolicy())
 
         pkey = None
         if self.private_key:
             key_path = Path(self.private_key).expanduser()
-            pkey = paramiko.RSAKey.from_private_key_file(str(key_path))
+            pkey = paramiko.PKey.from_path(str(key_path))
 
         LOGGER.debug("Connecting SSH to %s:%s", self.host, self.port)
-        client.connect(
-            hostname=self.host,
-            port=self.port,
-            username=self.username,
-            password=self.password,
-            pkey=pkey,
-            allow_agent=self.use_agent,
-            look_for_keys=self.use_agent,
-            timeout=self.timeout,
-        )
+        try:
+            client.connect(
+                hostname=self.host,
+                port=self.port,
+                username=self.username,
+                password=self.password,
+                pkey=pkey,
+                allow_agent=self.use_agent,
+                look_for_keys=self.use_agent,
+                timeout=self.timeout,
+            )
+        except paramiko.BadHostKeyException as exc:
+            raise RuntimeError(f"Host key verification failed for {self.host}:{self.port}") from exc
+        except paramiko.SSHException as exc:
+            raise RuntimeError(f"SSH connection failed for {self.host}:{self.port}: {exc}") from exc
 
         self.client = client
         self.sftp = client.open_sftp()

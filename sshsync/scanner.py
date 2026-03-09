@@ -17,6 +17,28 @@ from sshsync.utils import match_ignore_patterns, normalize_relative_path, sha256
 LOGGER = logging.getLogger(__name__)
 
 
+def _remote_sha256(connection: SSHConnection, remote_path: str) -> str | None:
+    """Compute remote SHA256 with tool fallbacks."""
+    quoted = shlex.quote(remote_path)
+    commands = [
+        f"sha256sum {quoted}",
+        f"shasum -a 256 {quoted}",
+        f"openssl dgst -sha256 {quoted}",
+    ]
+    for cmd in commands:
+        out, err, code = connection.exec_command(cmd)
+        if code != 0:
+            LOGGER.debug("Hash command failed for %s with %s: %s", remote_path, cmd, err.strip())
+            continue
+        text = out.strip()
+        if not text:
+            continue
+        if "=" in text:
+            return text.split("=")[-1].strip()
+        return text.split()[0]
+    return None
+
+
 def load_ignore_patterns(local_root: Path) -> list[str]:
     """Load ignore patterns from `.syncignore` under the local root."""
     ignore_file = local_root / ".syncignore"
@@ -82,7 +104,13 @@ def scan_remote_tree(
     stack = [normalized_root]
     while stack:
         current = stack.pop()
-        for attr in sftp.listdir_attr(current):
+        try:
+            attrs = sftp.listdir_attr(current)
+        except OSError as exc:
+            LOGGER.warning("Cannot list remote directory %s: %s", current, exc)
+            continue
+
+        for attr in attrs:
             remote_path = posixpath.join(current, attr.filename)
             rel_str = posixpath.relpath(remote_path, normalized_root)
             rel = PurePosixPath(rel_str)
@@ -96,12 +124,9 @@ def scan_remote_tree(
             elif stat.S_ISREG(attr.st_mode):
                 digest = None
                 if use_hash:
-                    cmd = f"sha256sum {shlex.quote(remote_path)} | awk '{{print $1}}'"
-                    out, err, code = connection.exec_command(cmd)
-                    if code == 0:
-                        digest = out.strip() or None
-                    else:
-                        LOGGER.warning("Remote hash failed for %s: %s", remote_path, err.strip())
+                    digest = _remote_sha256(connection, remote_path)
+                    if digest is None:
+                        LOGGER.warning("Remote hash failed for %s", remote_path)
 
                 result[rel] = FileMetadata(
                     relative_path=rel,

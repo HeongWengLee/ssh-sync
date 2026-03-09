@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 import os
 import posixpath
+import errno
 from pathlib import Path, PurePosixPath
 
 from rich.progress import BarColumn, Progress, TaskProgressColumn, TextColumn, TimeRemainingColumn
@@ -39,8 +40,11 @@ def _ensure_remote_dirs(sftp, remote_path: str) -> None:
         current = posixpath.join(current, seg)
         try:
             sftp.stat(current)
-        except IOError:
-            sftp.mkdir(current)
+        except OSError as exc:
+            if getattr(exc, "errno", None) in (None, errno.ENOENT):
+                sftp.mkdir(current)
+            else:
+                raise
 
 
 def download_file(
@@ -107,8 +111,11 @@ def upload_file(
     local_size = os.path.getsize(local_path)
     try:
         remote_size = int(sftp.stat(remote_path).st_size)
-    except IOError:
-        remote_size = 0
+    except OSError as exc:
+        if getattr(exc, "errno", None) in (None, errno.ENOENT):
+            remote_size = 0
+        else:
+            raise
     resume = remote_size <= local_size
     offset = remote_size if resume else 0
     mode = "ab" if offset > 0 else "wb"
