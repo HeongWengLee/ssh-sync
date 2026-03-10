@@ -149,6 +149,7 @@ def _run_mode(
     local_dir: Optional[Path],
     remote_dir: Optional[str],
     use_hash: bool,
+    delete_missing: bool,
     dry_run: bool,
     verbose: bool,
 ) -> None:
@@ -182,6 +183,7 @@ def _run_mode(
             remote_dir=cfg.sync.remote_dir,
             use_hash=cfg.options.use_hash,
             dry_run=dry_run,
+            delete_missing=delete_missing,
             console=console,
         )
 
@@ -196,10 +198,12 @@ def _run_mode(
 
         console.print("\nSync Summary")
         console.print("------------")
-        console.print(f"Uploaded files:   {len(result.uploaded)}")
-        console.print(f"Downloaded files: {len(result.downloaded)}")
-        console.print(f"Skipped files:    {len(result.skipped)}")
+        console.print(f"Total scanned:    {result.total_scanned}")
+        console.print(f"Ignored:          {result.skipped_ignored}")
+        console.print(f"Uploaded:         {len(result.uploaded)}")
+        console.print(f"Downloaded:       {len(result.downloaded)}")
         console.print(f"Conflicts:        {len(result.conflicts)}")
+        console.print(f"Duration:         {result.duration_seconds:.3f}s")
 
 
 common_options = {
@@ -213,6 +217,7 @@ common_options = {
     "local_dir": typer.Option(None, "--local-dir", help="Local directory path."),
     "remote_dir": typer.Option(None, "--remote-dir", help="Remote directory path."),
     "use_hash": typer.Option(False, "--use-hash", help="Use SHA256 verification."),
+    "delete_missing": typer.Option(False, "--delete", help="Delete files that exist only on one side."),
     "dry_run": typer.Option(False, "--dry-run", help="Show actions without transfer."),
     "verbose": typer.Option(False, "--verbose", help="Enable debug logs."),
 }
@@ -230,6 +235,7 @@ def pull(
     local_dir: Optional[Path] = common_options["local_dir"],
     remote_dir: Optional[str] = common_options["remote_dir"],
     use_hash: bool = common_options["use_hash"],
+    delete_missing: bool = common_options["delete_missing"],
     dry_run: bool = common_options["dry_run"],
     verbose: bool = common_options["verbose"],
 ) -> None:
@@ -246,6 +252,7 @@ def pull(
         local_dir,
         remote_dir,
         use_hash,
+        delete_missing,
         dry_run,
         verbose,
     )
@@ -263,6 +270,7 @@ def push(
     local_dir: Optional[Path] = common_options["local_dir"],
     remote_dir: Optional[str] = common_options["remote_dir"],
     use_hash: bool = common_options["use_hash"],
+    delete_missing: bool = common_options["delete_missing"],
     dry_run: bool = common_options["dry_run"],
     verbose: bool = common_options["verbose"],
 ) -> None:
@@ -279,6 +287,7 @@ def push(
         local_dir,
         remote_dir,
         use_hash,
+        delete_missing,
         dry_run,
         verbose,
     )
@@ -296,6 +305,7 @@ def sync(
     local_dir: Optional[Path] = common_options["local_dir"],
     remote_dir: Optional[str] = common_options["remote_dir"],
     use_hash: bool = common_options["use_hash"],
+    delete_missing: bool = common_options["delete_missing"],
     dry_run: bool = common_options["dry_run"],
     verbose: bool = common_options["verbose"],
 ) -> None:
@@ -312,6 +322,7 @@ def sync(
         local_dir,
         remote_dir,
         use_hash,
+        delete_missing,
         dry_run,
         verbose,
     )

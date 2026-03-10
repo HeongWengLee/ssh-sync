@@ -15,7 +15,7 @@ from rich.console import Console
 
 from sshsync.diff_engine import SyncPlan, build_pull_plan, build_push_plan, build_sync_plan
 from sshsync.metadata import FileMetadata
-from sshsync.scanner import load_ignore_patterns, scan_local_tree, scan_remote_tree
+from sshsync.scanner import ScanSummary, load_ignore_patterns, scan_local_tree, scan_remote_tree
 from sshsync.ssh_connection import SSHConnection
 from sshsync.transfer import download_file, upload_file
 from sshsync.utils import ensure_parent
@@ -33,6 +33,10 @@ class SyncResult:
     skipped: list[PurePosixPath] = field(default_factory=list)
     conflicts: list[PurePosixPath] = field(default_factory=list)
     skipped_ignored: int = 0
+    deleted_local: list[PurePosixPath] = field(default_factory=list)
+    deleted_remote: list[PurePosixPath] = field(default_factory=list)
+    total_scanned: int = 0
+    duration_seconds: float = 0.0
 
 
 class SyncEngine:
@@ -45,6 +49,7 @@ class SyncEngine:
         remote_dir: str,
         use_hash: bool = False,
         dry_run: bool = False,
+        delete_missing: bool = False,
         console: Console | None = None,
     ) -> None:
         self.connection = connection
@@ -52,6 +57,7 @@ class SyncEngine:
         self.remote_dir = posixpath.normpath(remote_dir)
         self.use_hash = use_hash
         self.dry_run = dry_run
+        self.delete_missing = delete_missing
         self.console = console or Console()
         self._transfer_errors = 0
         self._state_file = self.local_dir / ".sync_state.json"
@@ -59,34 +65,54 @@ class SyncEngine:
     def run_pull(self) -> SyncResult:
         """Execute pull mode (remote -> local)."""
         self._transfer_errors = 0
-        plan, _local_entries, _remote_entries, scan_skipped = self._build_plan("pull")
-        result = SyncResult(skipped_ignored=scan_skipped)
+        started = time.perf_counter()
+        plan, _local_entries, _remote_entries, scan_summary = self._build_plan("pull")
+        result = SyncResult(
+            skipped_ignored=scan_summary.ignored_files,
+            total_scanned=scan_summary.scanned_files,
+        )
         self._apply_downloads(plan.download, result)
+        self._apply_local_deletes(plan.delete_local, result)
+        self._apply_remote_deletes(plan.delete_remote, result)
         self._report_skips(plan.skip)
         result.skipped.extend(plan.skip)
-        self._report_ignored(scan_skipped)
+        self._report_ignored(scan_summary.ignored_files)
+        result.duration_seconds = time.perf_counter() - started
         return result
 
     def run_push(self) -> SyncResult:
         """Execute push mode (local -> remote)."""
         self._transfer_errors = 0
-        plan, _local_entries, _remote_entries, scan_skipped = self._build_plan("push")
-        result = SyncResult(skipped_ignored=scan_skipped)
+        started = time.perf_counter()
+        plan, _local_entries, _remote_entries, scan_summary = self._build_plan("push")
+        result = SyncResult(
+            skipped_ignored=scan_summary.ignored_files,
+            total_scanned=scan_summary.scanned_files,
+        )
         self._apply_uploads(plan.upload, result)
+        self._apply_local_deletes(plan.delete_local, result)
+        self._apply_remote_deletes(plan.delete_remote, result)
         self._report_skips(plan.skip)
         result.skipped.extend(plan.skip)
-        self._report_ignored(scan_skipped)
+        self._report_ignored(scan_summary.ignored_files)
+        result.duration_seconds = time.perf_counter() - started
         return result
 
     def run_sync(self) -> SyncResult:
         """Execute bidirectional sync mode."""
         self._transfer_errors = 0
+        started = time.perf_counter()
         last_sync = self._load_last_sync_timestamp()
-        plan, local_entries, remote_entries, scan_skipped = self._build_plan("sync", last_sync)
-        result = SyncResult(skipped_ignored=scan_skipped)
+        plan, local_entries, remote_entries, scan_summary = self._build_plan("sync", last_sync)
+        result = SyncResult(
+            skipped_ignored=scan_summary.ignored_files,
+            total_scanned=scan_summary.scanned_files,
+        )
 
         self._apply_uploads(plan.upload, result)
         self._apply_downloads(plan.download, result)
+        self._apply_local_deletes(plan.delete_local, result)
+        self._apply_remote_deletes(plan.delete_remote, result)
 
         unresolved_conflict = False
         for path in plan.conflicts:
@@ -107,39 +133,78 @@ class SyncEngine:
         self._report_skips(plan.skip)
         result.skipped.extend(plan.skip)
 
-        self._report_ignored(scan_skipped)
+        self._report_ignored(scan_summary.ignored_files)
 
         if not self.dry_run and self._transfer_errors == 0 and not unresolved_conflict:
             self._save_last_sync_timestamp(time.time())
 
+        result.duration_seconds = time.perf_counter() - started
         return result
 
     def _build_plan(
         self,
         mode: str,
         last_sync_timestamp: float | None = None,
-    ) -> tuple[SyncPlan, dict[PurePosixPath, FileMetadata], dict[PurePosixPath, FileMetadata], int]:
+    ) -> tuple[SyncPlan, dict[PurePosixPath, FileMetadata], dict[PurePosixPath, FileMetadata], ScanSummary]:
         """Scan trees and compute plan for a specific mode."""
         ignore_patterns = load_ignore_patterns(self.local_dir)
-        local_entries, local_skipped = scan_local_tree(self.local_dir, self.use_hash, ignore_patterns)
-        remote_entries, remote_skipped = scan_remote_tree(self.connection, self.remote_dir, self.use_hash, ignore_patterns)
-        skipped_files = local_skipped + remote_skipped
+        local_entries, local_summary = scan_local_tree(self.local_dir, self.use_hash, ignore_patterns)
+        remote_entries, remote_summary = scan_remote_tree(self.connection, self.remote_dir, self.use_hash, ignore_patterns)
+        scan_summary = ScanSummary(
+            scanned_files=local_summary.scanned_files + remote_summary.scanned_files,
+            ignored_files=local_summary.ignored_files + remote_summary.ignored_files,
+        )
 
         if mode == "pull":
-            plan = build_pull_plan(local_entries, remote_entries, self.use_hash)
+            plan = build_pull_plan(local_entries, remote_entries, self.use_hash, delete_missing=self.delete_missing)
         elif mode == "push":
-            plan = build_push_plan(local_entries, remote_entries, self.use_hash)
+            plan = build_push_plan(local_entries, remote_entries, self.use_hash, delete_missing=self.delete_missing)
         elif mode == "sync":
             plan = build_sync_plan(
                 local_entries,
                 remote_entries,
                 self.use_hash,
                 last_sync_timestamp=last_sync_timestamp,
+                delete_missing=self.delete_missing,
             )
         else:
             raise ValueError(f"Unsupported mode: {mode}")
 
-        return plan, local_entries, remote_entries, skipped_files
+        return plan, local_entries, remote_entries, scan_summary
+
+    def _apply_local_deletes(self, items: list[PurePosixPath], result: SyncResult) -> None:
+        """Delete local files planned for removal."""
+        for path in items:
+            target = self.local_dir / Path(path.as_posix())
+            if self.dry_run:
+                self.console.print(f"- delete {path.as_posix()}")
+                result.deleted_local.append(path)
+                continue
+            try:
+                target.unlink(missing_ok=True)
+                result.deleted_local.append(path)
+            except OSError as exc:
+                LOGGER.error("Local delete failed for %s: %s", path.as_posix(), exc)
+                self._transfer_errors += 1
+                result.skipped.append(path)
+
+    def _apply_remote_deletes(self, items: list[PurePosixPath], result: SyncResult) -> None:
+        """Delete remote files planned for removal."""
+        if self.connection.sftp is None:
+            raise RuntimeError("SFTP session is not connected")
+        for path in items:
+            remote_path = posixpath.join(self.remote_dir, path.as_posix())
+            if self.dry_run:
+                self.console.print(f"- delete {path.as_posix()}")
+                result.deleted_remote.append(path)
+                continue
+            try:
+                self.connection.sftp.remove(remote_path)
+                result.deleted_remote.append(path)
+            except OSError as exc:
+                LOGGER.error("Remote delete failed for %s: %s", path.as_posix(), exc)
+                self._transfer_errors += 1
+                result.skipped.append(path)
 
     def _load_last_sync_timestamp(self) -> float | None:
         """Load last successful sync timestamp from local state file."""

@@ -15,6 +15,8 @@ class SyncPlan:
 
     upload: list[PurePosixPath] = field(default_factory=list)
     download: list[PurePosixPath] = field(default_factory=list)
+    delete_local: list[PurePosixPath] = field(default_factory=list)
+    delete_remote: list[PurePosixPath] = field(default_factory=list)
     conflicts: list[PurePosixPath] = field(default_factory=list)
     skip: list[PurePosixPath] = field(default_factory=list)
 
@@ -50,6 +52,7 @@ def build_pull_plan(
     local_entries: dict[PurePosixPath, FileMetadata],
     remote_entries: dict[PurePosixPath, FileMetadata],
     use_hash: bool,
+    delete_missing: bool = False,
 ) -> SyncPlan:
     """Create transfer plan for pull mode."""
     plan = SyncPlan()
@@ -58,11 +61,22 @@ def build_pull_plan(
             continue
         local_meta = local_entries.get(path)
         if local_meta is None:
-            plan.download.append(path)
+            if delete_missing:
+                plan.delete_remote.append(path)
+            else:
+                plan.download.append(path)
         elif local_meta.is_file and _is_different(local_meta, remote_meta, use_hash):
             plan.download.append(path)
         else:
             plan.skip.append(path)
+
+    if delete_missing:
+        for path, local_meta in local_entries.items():
+            if local_meta.is_directory:
+                continue
+            if path not in remote_entries:
+                plan.delete_local.append(path)
+
     return plan
 
 
@@ -70,6 +84,7 @@ def build_push_plan(
     local_entries: dict[PurePosixPath, FileMetadata],
     remote_entries: dict[PurePosixPath, FileMetadata],
     use_hash: bool,
+    delete_missing: bool = False,
 ) -> SyncPlan:
     """Create transfer plan for push mode."""
     plan = SyncPlan()
@@ -78,11 +93,22 @@ def build_push_plan(
             continue
         remote_meta = remote_entries.get(path)
         if remote_meta is None:
-            plan.upload.append(path)
+            if delete_missing:
+                plan.delete_local.append(path)
+            else:
+                plan.upload.append(path)
         elif remote_meta.is_file and _is_different(local_meta, remote_meta, use_hash):
             plan.upload.append(path)
         else:
             plan.skip.append(path)
+
+    if delete_missing:
+        for path, remote_meta in remote_entries.items():
+            if remote_meta.is_directory:
+                continue
+            if path not in local_entries:
+                plan.delete_remote.append(path)
+
     return plan
 
 
@@ -91,6 +117,7 @@ def build_sync_plan(
     remote_entries: dict[PurePosixPath, FileMetadata],
     use_hash: bool,
     last_sync_timestamp: float | None = None,
+    delete_missing: bool = False,
 ) -> SyncPlan:
     """Create transfer/conflict plan for bidirectional sync mode."""
     plan = SyncPlan()
@@ -106,10 +133,16 @@ def build_sync_plan(
             continue
 
         if local_meta is None and remote_meta is not None:
-            plan.download.append(path)
+            if delete_missing:
+                plan.delete_remote.append(path)
+            else:
+                plan.download.append(path)
             continue
         if remote_meta is None and local_meta is not None:
-            plan.upload.append(path)
+            if delete_missing:
+                plan.delete_local.append(path)
+            else:
+                plan.upload.append(path)
             continue
         if local_meta is None or remote_meta is None:
             continue

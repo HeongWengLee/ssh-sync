@@ -7,6 +7,7 @@ import os
 import posixpath
 import shlex
 import stat
+from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 
 from sshsync.metadata import FileMetadata
@@ -16,6 +17,14 @@ from sshsync.utils import match_ignore_patterns, normalize_relative_path, sha256
 
 LOGGER = logging.getLogger(__name__)
 CONFLICT_SUFFIXES = (".local", ".remote")
+
+
+@dataclass(slots=True)
+class ScanSummary:
+    """Scanner counters for one tree walk."""
+
+    scanned_files: int = 0
+    ignored_files: int = 0
 
 
 def _remote_sha256(connection: SSHConnection, remote_path: str) -> str | None:
@@ -61,10 +70,10 @@ def scan_local_tree(
     local_root: Path,
     use_hash: bool,
     ignore_patterns: list[str],
-) -> tuple[dict[PurePosixPath, FileMetadata], int]:
-    """Recursively scan local tree and return metadata map and skipped count."""
+) -> tuple[dict[PurePosixPath, FileMetadata], ScanSummary]:
+    """Recursively scan local tree and return metadata map and scan summary."""
     result: dict[PurePosixPath, FileMetadata] = {}
-    skipped_files = 0
+    summary = ScanSummary()
     root = local_root.expanduser().resolve()
 
     for current, dirnames, filenames in os.walk(root):
@@ -75,7 +84,7 @@ def scan_local_tree(
         for name in dirnames:
             rel = normalize_relative_path(current_path / name, root)
             if match_ignore_patterns(rel, ignore_patterns):
-                skipped_files += 1
+                summary.ignored_files += 1
                 continue
             pruned_dirs.append(name)
             result[rel] = FileMetadata(relative_path=rel, kind="directory", size=0, mtime=(current_path / name).stat().st_mtime)
@@ -83,17 +92,18 @@ def scan_local_tree(
 
         for filename in filenames:
             full = current_path / filename
+            summary.scanned_files += 1
             rel = normalize_relative_path(full, root)
             if match_ignore_patterns(rel, ignore_patterns):
-                skipped_files += 1
+                summary.ignored_files += 1
                 continue
             if _is_conflict_artifact(rel):
-                skipped_files += 1
+                summary.ignored_files += 1
                 continue
             st = full.lstat()
             if stat.S_ISLNK(st.st_mode):
                 LOGGER.warning("Skipping local symlink: %s", rel.as_posix())
-                skipped_files += 1
+                summary.ignored_files += 1
                 continue
             digest = sha256_file(full) if use_hash else None
             result[rel] = FileMetadata(
@@ -104,7 +114,7 @@ def scan_local_tree(
                 sha256=digest,
             )
 
-    return result, skipped_files
+    return result, summary
 
 
 def scan_remote_tree(
@@ -112,14 +122,14 @@ def scan_remote_tree(
     remote_root: str,
     use_hash: bool,
     ignore_patterns: list[str],
-) -> tuple[dict[PurePosixPath, FileMetadata], int]:
-    """Recursively scan remote tree over SFTP and return metadata map and skipped count."""
+) -> tuple[dict[PurePosixPath, FileMetadata], ScanSummary]:
+    """Recursively scan remote tree over SFTP and return metadata map and scan summary."""
     if connection.sftp is None:
         raise RuntimeError("SFTP session is not connected")
 
     sftp = connection.sftp
     result: dict[PurePosixPath, FileMetadata] = {}
-    skipped_files = 0
+    summary = ScanSummary()
     normalized_root = posixpath.normpath(remote_root)
 
     stack = [normalized_root]
@@ -139,21 +149,22 @@ def scan_remote_tree(
             if rel_str == ".":
                 continue
             if match_ignore_patterns(rel, ignore_patterns):
-                skipped_files += 1
+                summary.ignored_files += 1
                 continue
             if _is_conflict_artifact(rel):
-                skipped_files += 1
+                summary.ignored_files += 1
                 continue
 
             if stat.S_ISLNK(attr.st_mode):
                 LOGGER.warning("Skipping remote symlink: %s", remote_path)
-                skipped_files += 1
+                summary.ignored_files += 1
                 continue
 
             if stat.S_ISDIR(attr.st_mode):
                 result[rel] = FileMetadata(relative_path=rel, kind="directory", size=0, mtime=float(attr.st_mtime))
                 stack.append(remote_path)
             elif stat.S_ISREG(attr.st_mode):
+                summary.scanned_files += 1
                 digest = None
                 if use_hash:
                     digest = _remote_sha256(connection, remote_path)
@@ -168,4 +179,4 @@ def scan_remote_tree(
                     sha256=digest,
                 )
 
-    return result, skipped_files
+    return result, summary
