@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass, field
 from pathlib import PurePosixPath
 
@@ -22,10 +23,13 @@ def _is_different(local: FileMetadata, remote: FileMetadata, use_hash: bool) -> 
     """Compare file metadata using size/mtime and optional hash."""
     if local.size != remote.size:
         return True
-    if int(local.mtime) != int(remote.mtime):
+
+    mtime_equal = math.isclose(local.mtime, remote.mtime, abs_tol=1e-3)
+    if not mtime_equal:
         if use_hash and local.sha256 and remote.sha256:
             return local.sha256 != remote.sha256
         return True
+
     if use_hash and local.sha256 and remote.sha256:
         return local.sha256 != remote.sha256
     return False
@@ -103,7 +107,7 @@ def build_sync_plan(
             continue
 
         # Conflict if both appear modified in non-equal ways by mtime and size/hash.
-        if int(local_meta.mtime) != int(remote_meta.mtime):
+        if not math.isclose(local_meta.mtime, remote_meta.mtime, abs_tol=1e-3):
             newer_local = local_meta.mtime > remote_meta.mtime
             newer_remote = remote_meta.mtime > local_meta.mtime
             if newer_local and not newer_remote:

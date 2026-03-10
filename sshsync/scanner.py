@@ -15,6 +15,7 @@ from sshsync.utils import match_ignore_patterns, normalize_relative_path, sha256
 
 
 LOGGER = logging.getLogger(__name__)
+CONFLICT_SUFFIXES = (".local", ".remote")
 
 
 def _remote_sha256(connection: SSHConnection, remote_path: str) -> str | None:
@@ -51,6 +52,11 @@ def load_ignore_patterns(local_root: Path) -> list[str]:
     return patterns
 
 
+def _is_conflict_artifact(path: PurePosixPath) -> bool:
+    """Return True if path is a sync conflict artifact file."""
+    return path.name.endswith(CONFLICT_SUFFIXES)
+
+
 def scan_local_tree(local_root: Path, use_hash: bool, ignore_patterns: list[str]) -> dict[PurePosixPath, FileMetadata]:
     """Recursively scan local tree and return normalized metadata map."""
     result: dict[PurePosixPath, FileMetadata] = {}
@@ -72,9 +78,12 @@ def scan_local_tree(local_root: Path, use_hash: bool, ignore_patterns: list[str]
         for filename in filenames:
             full = current_path / filename
             rel = normalize_relative_path(full, root)
-            if match_ignore_patterns(rel, ignore_patterns):
+            if match_ignore_patterns(rel, ignore_patterns) or _is_conflict_artifact(rel):
                 continue
-            st = full.stat()
+            st = full.lstat()
+            if stat.S_ISLNK(st.st_mode):
+                LOGGER.warning("Skipping local symlink: %s", rel.as_posix())
+                continue
             digest = sha256_file(full) if use_hash else None
             result[rel] = FileMetadata(
                 relative_path=rel,
@@ -115,7 +124,11 @@ def scan_remote_tree(
             rel_str = posixpath.relpath(remote_path, normalized_root)
             rel = PurePosixPath(rel_str)
 
-            if rel_str == "." or match_ignore_patterns(rel, ignore_patterns):
+            if rel_str == "." or match_ignore_patterns(rel, ignore_patterns) or _is_conflict_artifact(rel):
+                continue
+
+            if stat.S_ISLNK(attr.st_mode):
+                LOGGER.warning("Skipping remote symlink: %s", remote_path)
                 continue
 
             if stat.S_ISDIR(attr.st_mode):
