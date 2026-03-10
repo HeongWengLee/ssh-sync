@@ -57,9 +57,14 @@ def _is_conflict_artifact(path: PurePosixPath) -> bool:
     return path.name.endswith(CONFLICT_SUFFIXES)
 
 
-def scan_local_tree(local_root: Path, use_hash: bool, ignore_patterns: list[str]) -> dict[PurePosixPath, FileMetadata]:
-    """Recursively scan local tree and return normalized metadata map."""
+def scan_local_tree(
+    local_root: Path,
+    use_hash: bool,
+    ignore_patterns: list[str],
+) -> tuple[dict[PurePosixPath, FileMetadata], int]:
+    """Recursively scan local tree and return metadata map and skipped count."""
     result: dict[PurePosixPath, FileMetadata] = {}
+    skipped_files = 0
     root = local_root.expanduser().resolve()
 
     for current, dirnames, filenames in os.walk(root):
@@ -70,6 +75,7 @@ def scan_local_tree(local_root: Path, use_hash: bool, ignore_patterns: list[str]
         for name in dirnames:
             rel = normalize_relative_path(current_path / name, root)
             if match_ignore_patterns(rel, ignore_patterns):
+                skipped_files += 1
                 continue
             pruned_dirs.append(name)
             result[rel] = FileMetadata(relative_path=rel, kind="directory", size=0, mtime=(current_path / name).stat().st_mtime)
@@ -78,11 +84,16 @@ def scan_local_tree(local_root: Path, use_hash: bool, ignore_patterns: list[str]
         for filename in filenames:
             full = current_path / filename
             rel = normalize_relative_path(full, root)
-            if match_ignore_patterns(rel, ignore_patterns) or _is_conflict_artifact(rel):
+            if match_ignore_patterns(rel, ignore_patterns):
+                skipped_files += 1
+                continue
+            if _is_conflict_artifact(rel):
+                skipped_files += 1
                 continue
             st = full.lstat()
             if stat.S_ISLNK(st.st_mode):
                 LOGGER.warning("Skipping local symlink: %s", rel.as_posix())
+                skipped_files += 1
                 continue
             digest = sha256_file(full) if use_hash else None
             result[rel] = FileMetadata(
@@ -93,7 +104,7 @@ def scan_local_tree(local_root: Path, use_hash: bool, ignore_patterns: list[str]
                 sha256=digest,
             )
 
-    return result
+    return result, skipped_files
 
 
 def scan_remote_tree(
@@ -101,13 +112,14 @@ def scan_remote_tree(
     remote_root: str,
     use_hash: bool,
     ignore_patterns: list[str],
-) -> dict[PurePosixPath, FileMetadata]:
-    """Recursively scan remote tree over SFTP and return metadata map."""
+) -> tuple[dict[PurePosixPath, FileMetadata], int]:
+    """Recursively scan remote tree over SFTP and return metadata map and skipped count."""
     if connection.sftp is None:
         raise RuntimeError("SFTP session is not connected")
 
     sftp = connection.sftp
     result: dict[PurePosixPath, FileMetadata] = {}
+    skipped_files = 0
     normalized_root = posixpath.normpath(remote_root)
 
     stack = [normalized_root]
@@ -124,11 +136,18 @@ def scan_remote_tree(
             rel_str = posixpath.relpath(remote_path, normalized_root)
             rel = PurePosixPath(rel_str)
 
-            if rel_str == "." or match_ignore_patterns(rel, ignore_patterns) or _is_conflict_artifact(rel):
+            if rel_str == ".":
+                continue
+            if match_ignore_patterns(rel, ignore_patterns):
+                skipped_files += 1
+                continue
+            if _is_conflict_artifact(rel):
+                skipped_files += 1
                 continue
 
             if stat.S_ISLNK(attr.st_mode):
                 LOGGER.warning("Skipping remote symlink: %s", remote_path)
+                skipped_files += 1
                 continue
 
             if stat.S_ISDIR(attr.st_mode):
@@ -149,5 +168,4 @@ def scan_remote_tree(
                     sha256=digest,
                 )
 
-    return result
-
+    return result, skipped_files

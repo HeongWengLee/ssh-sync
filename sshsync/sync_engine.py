@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import difflib
+import json
 import logging
 import posixpath
 import shutil
+import time
 from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
 
@@ -30,6 +32,7 @@ class SyncResult:
     downloaded: list[PurePosixPath] = field(default_factory=list)
     skipped: list[PurePosixPath] = field(default_factory=list)
     conflicts: list[PurePosixPath] = field(default_factory=list)
+    skipped_ignored: int = 0
 
 
 class SyncEngine:
@@ -50,33 +53,42 @@ class SyncEngine:
         self.use_hash = use_hash
         self.dry_run = dry_run
         self.console = console or Console()
+        self._transfer_errors = 0
+        self._state_file = self.local_dir / ".sync_state.json"
 
     def run_pull(self) -> SyncResult:
         """Execute pull mode (remote -> local)."""
-        plan, _local_entries, _remote_entries = self._build_plan("pull")
-        result = SyncResult()
+        self._transfer_errors = 0
+        plan, _local_entries, _remote_entries, scan_skipped = self._build_plan("pull")
+        result = SyncResult(skipped_ignored=scan_skipped)
         self._apply_downloads(plan.download, result)
         self._report_skips(plan.skip)
         result.skipped.extend(plan.skip)
+        self._report_ignored(scan_skipped)
         return result
 
     def run_push(self) -> SyncResult:
         """Execute push mode (local -> remote)."""
-        plan, _local_entries, _remote_entries = self._build_plan("push")
-        result = SyncResult()
+        self._transfer_errors = 0
+        plan, _local_entries, _remote_entries, scan_skipped = self._build_plan("push")
+        result = SyncResult(skipped_ignored=scan_skipped)
         self._apply_uploads(plan.upload, result)
         self._report_skips(plan.skip)
         result.skipped.extend(plan.skip)
+        self._report_ignored(scan_skipped)
         return result
 
     def run_sync(self) -> SyncResult:
         """Execute bidirectional sync mode."""
-        plan, local_entries, remote_entries = self._build_plan("sync")
-        result = SyncResult()
+        self._transfer_errors = 0
+        last_sync = self._load_last_sync_timestamp()
+        plan, local_entries, remote_entries, scan_skipped = self._build_plan("sync", last_sync)
+        result = SyncResult(skipped_ignored=scan_skipped)
 
         self._apply_uploads(plan.upload, result)
         self._apply_downloads(plan.download, result)
 
+        unresolved_conflict = False
         for path in plan.conflicts:
             result.conflicts.append(path)
             choice = self._resolve_conflict(path, local_entries, remote_entries)
@@ -89,31 +101,84 @@ class SyncEngine:
                 result.downloaded.append(path)
                 result.uploaded.append(path)
             elif choice == "skip":
+                unresolved_conflict = True
                 result.skipped.append(path)
 
         self._report_skips(plan.skip)
         result.skipped.extend(plan.skip)
+
+        self._report_ignored(scan_skipped)
+
+        if not self.dry_run and self._transfer_errors == 0 and not unresolved_conflict:
+            self._save_last_sync_timestamp(time.time())
+
         return result
 
     def _build_plan(
         self,
         mode: str,
-    ) -> tuple[SyncPlan, dict[PurePosixPath, FileMetadata], dict[PurePosixPath, FileMetadata]]:
+        last_sync_timestamp: float | None = None,
+    ) -> tuple[SyncPlan, dict[PurePosixPath, FileMetadata], dict[PurePosixPath, FileMetadata], int]:
         """Scan trees and compute plan for a specific mode."""
         ignore_patterns = load_ignore_patterns(self.local_dir)
-        local_entries = scan_local_tree(self.local_dir, self.use_hash, ignore_patterns)
-        remote_entries = scan_remote_tree(self.connection, self.remote_dir, self.use_hash, ignore_patterns)
+        local_entries, local_skipped = scan_local_tree(self.local_dir, self.use_hash, ignore_patterns)
+        remote_entries, remote_skipped = scan_remote_tree(self.connection, self.remote_dir, self.use_hash, ignore_patterns)
+        skipped_files = local_skipped + remote_skipped
 
         if mode == "pull":
             plan = build_pull_plan(local_entries, remote_entries, self.use_hash)
         elif mode == "push":
             plan = build_push_plan(local_entries, remote_entries, self.use_hash)
         elif mode == "sync":
-            plan = build_sync_plan(local_entries, remote_entries, self.use_hash)
+            plan = build_sync_plan(
+                local_entries,
+                remote_entries,
+                self.use_hash,
+                last_sync_timestamp=last_sync_timestamp,
+            )
         else:
             raise ValueError(f"Unsupported mode: {mode}")
 
-        return plan, local_entries, remote_entries
+        return plan, local_entries, remote_entries, skipped_files
+
+    def _load_last_sync_timestamp(self) -> float | None:
+        """Load last successful sync timestamp from local state file."""
+        if not self._state_file.exists():
+            return None
+        try:
+            payload = json.loads(self._state_file.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            LOGGER.warning("Invalid sync state file, ignoring: %s", self._state_file)
+            return None
+
+        raw = payload.get("last_sync_timestamp")
+        if isinstance(raw, (float, int)):
+            return float(raw)
+        return None
+
+    def _save_last_sync_timestamp(self, timestamp: float) -> None:
+        """Persist last successful sync timestamp to local state file."""
+        try:
+            self._state_file.write_text(
+                json.dumps({"last_sync_timestamp": timestamp}, indent=2),
+                encoding="utf-8",
+            )
+        except OSError as exc:
+            LOGGER.warning("Unable to write sync state file %s: %s", self._state_file, exc)
+
+    def _is_binary_local(self, path: Path) -> bool:
+        """Return True when local file appears binary by probing header bytes."""
+        with path.open("rb") as handle:
+            sample = handle.read(1024)
+        return b"\x00" in sample
+
+    def _is_binary_remote(self, remote_path: str) -> bool:
+        """Return True when remote file appears binary by probing header bytes."""
+        if self.connection.sftp is None:
+            raise RuntimeError("SFTP session is not connected")
+        with self.connection.sftp.open(remote_path, "rb") as handle:
+            sample = handle.read(1024)
+        return b"\x00" in sample
 
     def _apply_downloads(self, items: list[PurePosixPath], result: SyncResult) -> None:
         """Apply planned downloads with dry-run support."""
@@ -127,6 +192,7 @@ class SyncEngine:
                 result.downloaded.append(path)
             except OSError as exc:
                 LOGGER.error("Download failed for %s: %s", path.as_posix(), exc)
+                self._transfer_errors += 1
                 result.skipped.append(path)
 
     def _apply_uploads(self, items: list[PurePosixPath], result: SyncResult) -> None:
@@ -141,6 +207,7 @@ class SyncEngine:
                 result.uploaded.append(path)
             except OSError as exc:
                 LOGGER.error("Upload failed for %s: %s", path.as_posix(), exc)
+                self._transfer_errors += 1
                 result.skipped.append(path)
 
     def _resolve_conflict(
@@ -182,6 +249,13 @@ class SyncEngine:
         remote_path = posixpath.join(self.remote_dir, relative_path.as_posix())
 
         try:
+            if self._is_binary_local(local_path) or self._is_binary_remote(remote_path):
+                self.console.print("Binary file detected, diff view not supported.")
+                return
+        except OSError:
+            self.console.print("Unable to detect binary/text mode; continuing with text diff.")
+
+        try:
             with local_path.open("r", encoding="utf-8", errors="replace") as lf:
                 local_text = lf.readlines(200_000)
             local_text = [line.rstrip("\n") for line in local_text]
@@ -189,7 +263,7 @@ class SyncEngine:
             local_text = ["<unable to read local text>"]
 
         try:
-            with self.connection.sftp.open(remote_path, "r") as handle:
+            with self.connection.sftp.open(remote_path, "rb") as handle:
                 remote_data = handle.read(200_000)
                 remote_text = remote_data.decode("utf-8", errors="replace").splitlines()
         except OSError:
@@ -203,7 +277,7 @@ class SyncEngine:
             lineterm="",
         )
         rendered = "\n".join(diff) or "No textual differences to display."
-        self.console.print(rendered)
+        self.console.print(rendered, markup=False, highlight=False)
 
     def _report_skips(self, items: list[PurePosixPath]) -> None:
         """Print skipped files in dry-run mode."""
@@ -211,6 +285,10 @@ class SyncEngine:
             return
         for path in items:
             self.console.print(f"- skip {path.as_posix()}")
+
+    def _report_ignored(self, count: int) -> None:
+        """Display skipped-by-ignore count in run output."""
+        self.console.print(f"Ignored/skipped by scanner: {count}")
 
     def _keep_both(self, relative_path: PurePosixPath) -> None:
         """Keep both local and remote versions as `.local` and `.remote` files."""

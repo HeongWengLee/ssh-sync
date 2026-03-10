@@ -11,6 +11,30 @@ import paramiko
 LOGGER = logging.getLogger(__name__)
 
 
+class InteractiveTrustPolicy(paramiko.MissingHostKeyPolicy):
+    """Prompt user to trust unknown host keys at runtime."""
+
+    def __init__(self, known_hosts_path: Path | None = None) -> None:
+        self.known_hosts_path = known_hosts_path or (Path.home() / ".ssh" / "known_hosts")
+
+    def missing_host_key(self, client: paramiko.SSHClient, hostname: str, key: paramiko.PKey) -> None:
+        fingerprint = ":".join(f"{b:02x}" for b in key.get_fingerprint())
+        answer = input(
+            f"Unknown SSH host '{hostname}' ({key.get_name()} {fingerprint}). Trust and continue? [y/N]: "
+        ).strip().lower()
+
+        if answer not in {"y", "yes"}:
+            raise paramiko.SSHException(f"User rejected unknown host key for {hostname}")
+
+        host_keys = client.get_host_keys()
+        host_keys.add(hostname, key.get_name(), key)
+        try:
+            self.known_hosts_path.parent.mkdir(parents=True, exist_ok=True)
+            client.save_host_keys(str(self.known_hosts_path))
+        except OSError as exc:
+            LOGGER.warning("Unable to persist known_hosts entry to %s: %s", self.known_hosts_path, exc)
+
+
 class SSHConnection:
     """Manage SSH and SFTP sessions with multiple auth methods."""
 
@@ -23,6 +47,7 @@ class SSHConnection:
         password: str | None = None,
         use_agent: bool = True,
         timeout: int = 20,
+        insecure: bool = False,
     ) -> None:
         self.host = host
         self.port = port
@@ -31,6 +56,7 @@ class SSHConnection:
         self.password = password
         self.use_agent = use_agent
         self.timeout = timeout
+        self.insecure = insecure
         self.client: paramiko.SSHClient | None = None
         self.sftp: paramiko.SFTPClient | None = None
 
@@ -41,7 +67,10 @@ class SSHConnection:
 
         client = paramiko.SSHClient()
         client.load_system_host_keys()
-        client.set_missing_host_key_policy(paramiko.RejectPolicy())
+        if self.insecure:
+            client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+        else:
+            client.set_missing_host_key_policy(InteractiveTrustPolicy())
 
         pkey = None
         if self.private_key:

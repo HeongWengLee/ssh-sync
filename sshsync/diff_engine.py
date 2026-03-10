@@ -35,6 +35,17 @@ def _is_different(local: FileMetadata, remote: FileMetadata, use_hash: bool) -> 
     return False
 
 
+def _plan_by_newer_mtime(plan: SyncPlan, path: PurePosixPath, local_meta: FileMetadata, remote_meta: FileMetadata) -> None:
+    """Fallback strategy: choose newer side when baseline is unavailable."""
+    if math.isclose(local_meta.mtime, remote_meta.mtime, abs_tol=1e-3):
+        plan.conflicts.append(path)
+        return
+    if local_meta.mtime > remote_meta.mtime:
+        plan.upload.append(path)
+    else:
+        plan.download.append(path)
+
+
 def build_pull_plan(
     local_entries: dict[PurePosixPath, FileMetadata],
     remote_entries: dict[PurePosixPath, FileMetadata],
@@ -79,6 +90,7 @@ def build_sync_plan(
     local_entries: dict[PurePosixPath, FileMetadata],
     remote_entries: dict[PurePosixPath, FileMetadata],
     use_hash: bool,
+    last_sync_timestamp: float | None = None,
 ) -> SyncPlan:
     """Create transfer/conflict plan for bidirectional sync mode."""
     plan = SyncPlan()
@@ -106,18 +118,20 @@ def build_sync_plan(
             plan.skip.append(path)
             continue
 
-        # Conflict if both appear modified in non-equal ways by mtime and size/hash.
-        if not math.isclose(local_meta.mtime, remote_meta.mtime, abs_tol=1e-3):
-            newer_local = local_meta.mtime > remote_meta.mtime
-            newer_remote = remote_meta.mtime > local_meta.mtime
-            if newer_local and not newer_remote:
+        if last_sync_timestamp is not None:
+            local_changed = local_meta.mtime > last_sync_timestamp
+            remote_changed = remote_meta.mtime > last_sync_timestamp
+
+            if local_changed and remote_changed:
+                plan.conflicts.append(path)
+            elif local_changed:
                 plan.upload.append(path)
-            elif newer_remote and not newer_local:
+            elif remote_changed:
                 plan.download.append(path)
             else:
-                plan.conflicts.append(path)
-        else:
-            plan.conflicts.append(path)
+                _plan_by_newer_mtime(plan, path, local_meta, remote_meta)
+            continue
+
+        _plan_by_newer_mtime(plan, path, local_meta, remote_meta)
 
     return plan
-
