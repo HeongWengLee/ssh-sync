@@ -91,6 +91,9 @@ def scan_local_tree(
         dirnames[:] = pruned_dirs
 
         for filename in filenames:
+            if filename == ".sync_state.json":
+                continue
+
             full = current_path / filename
             summary.scanned_files += 1
             rel = normalize_relative_path(full, root)

@@ -77,6 +77,10 @@ class SyncEngine:
         self._report_skips(plan.skip)
         result.skipped.extend(plan.skip)
         self._report_ignored(scan_summary.ignored_files)
+
+        if not self.dry_run and self._transfer_errors == 0:
+            self._save_last_sync_timestamp(time.time())
+
         result.duration_seconds = time.perf_counter() - started
         return result
 
@@ -95,6 +99,10 @@ class SyncEngine:
         self._report_skips(plan.skip)
         result.skipped.extend(plan.skip)
         self._report_ignored(scan_summary.ignored_files)
+
+        if not self.dry_run and self._transfer_errors == 0:
+            self._save_last_sync_timestamp(time.time())
+
         result.duration_seconds = time.perf_counter() - started
         return result
 
