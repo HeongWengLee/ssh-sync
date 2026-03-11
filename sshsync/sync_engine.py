@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import concurrent.futures
 import difflib
 import json
 import logging
+import math
 import posixpath
 import shutil
 import time
@@ -50,6 +52,9 @@ class SyncEngine:
         use_hash: bool = False,
         dry_run: bool = False,
         delete_missing: bool = False,
+        copy_links: bool = False,
+        conflict_policy: str = "interactive",
+        verify: bool = False,
         console: Console | None = None,
     ) -> None:
         self.connection = connection
@@ -58,6 +63,9 @@ class SyncEngine:
         self.use_hash = use_hash
         self.dry_run = dry_run
         self.delete_missing = delete_missing
+        self.copy_links = copy_links
+        self.conflict_policy = conflict_policy
+        self.verify = verify
         self.console = console or Console()
         self._transfer_errors = 0
         self._state_file = self.local_dir / ".sync_state.json"
@@ -156,8 +164,19 @@ class SyncEngine:
     ) -> tuple[SyncPlan, dict[PurePosixPath, FileMetadata], dict[PurePosixPath, FileMetadata], ScanSummary]:
         """Scan trees and compute plan for a specific mode."""
         ignore_patterns = load_ignore_patterns(self.local_dir)
-        local_entries, local_summary = scan_local_tree(self.local_dir, self.use_hash, ignore_patterns)
-        remote_entries, remote_summary = scan_remote_tree(self.connection, self.remote_dir, self.use_hash, ignore_patterns)
+        local_entries, local_summary = scan_local_tree(
+            self.local_dir,
+            self.use_hash,
+            ignore_patterns,
+            copy_links=self.copy_links,
+        )
+        remote_entries, remote_summary = scan_remote_tree(
+            self.connection,
+            self.remote_dir,
+            self.use_hash,
+            ignore_patterns,
+            copy_links=self.copy_links,
+        )
         scan_summary = ScanSummary(
             scanned_files=local_summary.scanned_files + remote_summary.scanned_files,
             ignored_files=local_summary.ignored_files + remote_summary.ignored_files,
@@ -259,14 +278,32 @@ class SyncEngine:
             if self.dry_run:
                 self.console.print(f"+ download {path.as_posix()}")
                 result.downloaded.append(path)
-                continue
-            try:
-                download_file(self.connection, self.remote_dir, self.local_dir, path, dry_run=False)
-                result.downloaded.append(path)
-            except OSError as exc:
-                LOGGER.error("Download failed for %s: %s", path.as_posix(), exc)
-                self._transfer_errors += 1
-                result.skipped.append(path)
+
+        if self.dry_run or not items:
+            return
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=4) as executor:
+            future_to_path = {
+                executor.submit(
+                    download_file,
+                    self.connection,
+                    self.remote_dir,
+                    self.local_dir,
+                    path,
+                    False,
+                    self.verify,
+                ): path
+                for path in items
+            }
+            for future in concurrent.futures.as_completed(future_to_path):
+                path = future_to_path[future]
+                try:
+                    future.result()
+                    result.downloaded.append(path)
+                except (OSError, RuntimeError) as exc:
+                    LOGGER.error("Download failed for %s: %s", path.as_posix(), exc)
+                    self._transfer_errors += 1
+                    result.skipped.append(path)
 
     def _apply_uploads(self, items: list[PurePosixPath], result: SyncResult) -> None:
         """Apply planned uploads with dry-run support."""
@@ -274,14 +311,33 @@ class SyncEngine:
             if self.dry_run:
                 self.console.print(f"+ upload {path.as_posix()}")
                 result.uploaded.append(path)
-                continue
-            try:
-                upload_file(self.connection, self.local_dir, self.remote_dir, path, dry_run=False)
-                result.uploaded.append(path)
-            except OSError as exc:
-                LOGGER.error("Upload failed for %s: %s", path.as_posix(), exc)
-                self._transfer_errors += 1
-                result.skipped.append(path)
+
+        if self.dry_run or not items:
+            return
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=4) as executor:
+            future_to_path = {
+                executor.submit(
+                    upload_file,
+                    self.connection,
+                    self.local_dir,
+                    self.remote_dir,
+                    path,
+                    False,
+                    self.copy_links,
+                    self.verify,
+                ): path
+                for path in items
+            }
+            for future in concurrent.futures.as_completed(future_to_path):
+                path = future_to_path[future]
+                try:
+                    future.result()
+                    result.uploaded.append(path)
+                except (OSError, RuntimeError) as exc:
+                    LOGGER.error("Upload failed for %s: %s", path.as_posix(), exc)
+                    self._transfer_errors += 1
+                    result.skipped.append(path)
 
     def _resolve_conflict(
         self,
@@ -289,7 +345,24 @@ class SyncEngine:
         local_entries: dict[PurePosixPath, FileMetadata],
         remote_entries: dict[PurePosixPath, FileMetadata],
     ) -> str:
-        """Prompt user to resolve conflict for one path."""
+        """Resolve conflict according to configured policy or interactively."""
+        if self.conflict_policy == "remote":
+            return "remote"
+        if self.conflict_policy == "local":
+            return "local"
+        if self.conflict_policy == "skip":
+            return "skip"
+        if self.conflict_policy == "newer":
+            local_meta = local_entries.get(path)
+            remote_meta = remote_entries.get(path)
+            if local_meta is None:
+                return "remote"
+            if remote_meta is None:
+                return "local"
+            if math.isclose(local_meta.mtime, remote_meta.mtime, abs_tol=1e-3):
+                return "skip"
+            return "local" if local_meta.mtime > remote_meta.mtime else "remote"
+
         self.console.print(f"Conflict detected: {path.as_posix()}")
         self.console.print("1) Use remote version")
         self.console.print("2) Use local version")

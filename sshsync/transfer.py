@@ -35,6 +35,30 @@ def _sha256_prefix_remote(sftp, remote_path: str, size: int = SAMPLE_SIZE) -> st
     return hasher.hexdigest()
 
 
+def _sha256_full_local(path: Path, chunk_size: int = 1024 * 1024) -> str:
+    """Return SHA256 of full local file."""
+    hasher = hashlib.sha256()
+    with path.open("rb") as handle:
+        while True:
+            chunk = handle.read(chunk_size)
+            if not chunk:
+                break
+            hasher.update(chunk)
+    return hasher.hexdigest()
+
+
+def _sha256_full_remote(sftp, remote_path: str, chunk_size: int = 1024 * 1024) -> str:
+    """Return SHA256 of full remote file over SFTP."""
+    hasher = hashlib.sha256()
+    with sftp.open(remote_path, "rb") as handle:
+        while True:
+            chunk = handle.read(chunk_size)
+            if not chunk:
+                break
+            hasher.update(chunk)
+    return hasher.hexdigest()
+
+
 def _progress() -> Progress:
     return Progress(
         TextColumn("{task.description}"),
@@ -71,6 +95,7 @@ def download_file(
     local_root: Path,
     relative_path: PurePosixPath,
     dry_run: bool,
+    verify: bool = False,
 ) -> None:
     """Download one file from remote, resuming existing partial local file."""
     if connection.sftp is None:
@@ -84,10 +109,9 @@ def download_file(
         return
 
     ensure_parent(local_path)
-    remote_size = int(sftp.stat(remote_path).st_size)
+    remote_stat = sftp.stat(remote_path)
+    remote_size = int(remote_stat.st_size)
     existing_size = local_path.stat().st_size if local_path.exists() else 0
-    local_mtime = local_path.stat().st_mtime if local_path.exists() else 0.0
-    remote_mtime = float(sftp.stat(remote_path).st_mtime)
     resume = existing_size <= remote_size
 
     if resume and existing_size > 0:
@@ -114,6 +138,16 @@ def download_file(
                     l_handle.write(chunk)
                     progress.advance(task, len(chunk))
 
+    os.chmod(local_path, int(remote_stat.st_mode) & 0o7777)
+    if verify:
+        local_digest = _sha256_full_local(local_path)
+        remote_digest = _sha256_full_remote(sftp, remote_path)
+        if local_digest != remote_digest:
+            raise RuntimeError(
+                f"Checksum mismatch for downloaded file {relative_path.as_posix()} "
+                f"(local={local_digest}, remote={remote_digest})"
+            )
+
 
 def upload_file(
     connection: SSHConnection,
@@ -121,6 +155,8 @@ def upload_file(
     remote_root: str,
     relative_path: PurePosixPath,
     dry_run: bool,
+    copy_links: bool = False,
+    verify: bool = False,
 ) -> None:
     """Upload one file to remote, resuming when remote partial file exists."""
     if connection.sftp is None:
@@ -128,6 +164,9 @@ def upload_file(
 
     sftp = connection.sftp
     local_path = local_root / Path(relative_path.as_posix())
+    source_path = local_path
+    if copy_links and local_path.is_symlink():
+        source_path = local_path.resolve(strict=True)
     remote_path = posixpath.join(remote_root.rstrip("/"), relative_path.as_posix())
 
     if dry_run:
@@ -135,7 +174,7 @@ def upload_file(
 
     _ensure_remote_dirs(sftp, remote_path)
 
-    local_size = os.path.getsize(local_path)
+    local_size = os.path.getsize(source_path)
     try:
         remote_size = int(sftp.stat(remote_path).st_size)
     except OSError as exc:
@@ -143,7 +182,7 @@ def upload_file(
             remote_size = 0
         else:
             raise
-    local_mtime = os.path.getmtime(local_path)
+    local_mtime = os.path.getmtime(source_path)
     remote_mtime = 0.0
     if remote_size > 0:
         remote_mtime = float(sftp.stat(remote_path).st_mtime)
@@ -153,7 +192,7 @@ def upload_file(
         if local_mtime > remote_mtime:
             resume = False
         else:
-            local_prefix = _sha256_prefix_local(local_path)
+            local_prefix = _sha256_prefix_local(source_path)
             remote_prefix = _sha256_prefix_remote(sftp, remote_path)
             if local_prefix != remote_prefix:
                 resume = False
@@ -165,7 +204,7 @@ def upload_file(
         task = progress.add_task(f"Uploading {relative_path.as_posix()}", total=local_size)
         progress.update(task, completed=offset)
 
-        with local_path.open("rb") as l_handle:
+        with source_path.open("rb") as l_handle:
             with sftp.open(remote_path, mode) as r_handle:
                 if offset > 0:
                     l_handle.seek(offset)
@@ -175,4 +214,15 @@ def upload_file(
                         break
                     r_handle.write(chunk)
                     progress.advance(task, len(chunk))
+
+    local_mode = int(os.stat(source_path).st_mode) & 0o7777
+    sftp.chmod(remote_path, local_mode)
+    if verify:
+        local_digest = _sha256_full_local(source_path)
+        remote_digest = _sha256_full_remote(sftp, remote_path)
+        if local_digest != remote_digest:
+            raise RuntimeError(
+                f"Checksum mismatch for uploaded file {relative_path.as_posix()} "
+                f"(local={local_digest}, remote={remote_digest})"
+            )
 

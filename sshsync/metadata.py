@@ -18,6 +18,7 @@ class FileMetadata:
     kind: PathKind
     size: int
     mtime: float
+    mode: int = 0
     sha256: str | None = None
 
     @property

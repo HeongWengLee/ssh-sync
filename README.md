@@ -2,7 +2,7 @@
 
 `ssh-sync` is a Python CLI utility for file synchronization between a local directory and a remote Linux host over SSH/SFTP.
 
-It supports `pull`, `push`, and bidirectional `sync`, with incremental planning (size/mtime, optional hash), conflict prompts, resumable transfers, `.syncignore`, dry-run planning output, and stateful conflict detection based on the last successful sync timestamp.
+It supports `pull`, `push`, and bidirectional `sync`, with incremental planning (size/mtime, optional hash), configurable conflict resolution policies, resumable transfers, optional transfer checksum verification, `.syncignore`, dry-run planning output, and stateful conflict detection based on the last successful sync timestamp.
 
 ## Requirements
 
@@ -32,12 +32,17 @@ Optional (for remote hash verification with `--use-hash`):
   - password authentication
   - SSH agent authentication
   - interactive host-key trust prompt for unknown hosts (saved to `~/.ssh/known_hosts`)
+  - retry with exponential backoff for transient SSH/network failures (2s, 4s, 8s)
 - Recursive local/remote scanning over filesystem + SFTP
 - Incremental comparison using size + mtime (with optional SHA256 verification)
 - Optional hash verification (`--use-hash`)
-- Conflict resolution menu for bidirectional sync
+- Conflict resolution menu for bidirectional sync and policy-driven auto-resolution (`--conflict-policy`)
 - Text diff preview for conflicts (`Show diff`), with binary-file detection
 - SFTP upload/download with resume support
+- Optional end-to-end transfer validation (`--verify`) with SHA256 on both sides
+- File permission synchronization for uploaded/downloaded files
+- Optional symlink following (`--copy-links`) to copy linked file contents
+- Parallel upload/download execution (up to 4 workers)
 - Remote parent directory auto-creation on upload
 - Dry-run mode (`--dry-run`) that prints planned actions
 - Deletion mode (`--delete`) to remove one-sided files
@@ -62,7 +67,7 @@ High-level flow:
 3. Load ignore patterns from `.syncignore`
 4. Scan local + remote trees
 5. Build plan (`upload`, `download`, `delete`, `skip`, `conflicts`)
-6. Execute plan (or print only in dry-run)
+6. Execute plan in parallel transfers (or print only in dry-run)
 7. Resolve conflicts interactively in `sync` mode
 8. Print summary and persist last successful sync timestamp (when eligible)
 
@@ -237,6 +242,9 @@ Available command options (`pull`, `push`, `sync`):
 - `--remote-dir`: remote root directory
 - `--use-hash`: include SHA256 in comparison logic
 - `--delete`: remove files that exist on only one side
+- `--copy-links`: follow symlinks and copy target file content (default: skip symlinks)
+- `--conflict-policy`: `interactive` (default), `remote`, `local`, `newer`, `skip`
+- `--verify`: after each transfer, compare full SHA256 across local/remote and fail on mismatch
 - `--dry-run`: show actions without transferring/deleting
 - `--verbose`: debug logging
 
@@ -293,14 +301,17 @@ Planning is implemented in `diff_engine` and uses per-file metadata from both si
   - `pkey` from `--private-key` (if supplied)
   - `password` from `--remote-password` (if supplied)
   - agent/key discovery controlled by `--use-agent/--no-agent`
-- Opens one SSH client and one SFTP session per run via context manager.
+- Retries transient connection failures up to 3 times with exponential backoff (2s, 4s, 8s), covering `paramiko.SSHException` and socket-level errors.
+- Opens one SSH client and one SFTP session per run via context manager, then reuses that session for scanning, planning, and all transfers.
 - Runtime supports an `insecure` mode internally (auto-accept host keys), but CLI does not currently expose an `--insecure` flag.
 
 ## Scanner Behavior
 
 - Local scanner walks recursively with `os.walk`.
 - Remote scanner walks recursively with `SFTP.listdir_attr`.
-- Symlinks are skipped on both sides (warning logged).
+- By default symlinks are skipped on both sides (warning logged).
+- With `--copy-links`, symlinks to regular files are followed and treated as normal files by the scanner (target metadata/content is used).
+- Symlinks to directories remain skipped to preserve planner behavior and avoid traversal ambiguity.
 - `.syncignore` is read only from local root and then applied to both local and remote relative paths.
 - Ignore lines:
   - blank lines and `#` comments are ignored
@@ -319,6 +330,17 @@ Implemented in `transfer.py` for both upload and download:
 - Parent directories are created automatically:
   - local parent on download
   - remote parent path on upload
+- Permissions are synchronized after transfer:
+  - upload: applies local mode to remote file via SFTP `chmod`
+  - download: applies remote mode to local file via `chmod`
+- With `--verify`, each completed transfer is validated with a full SHA256 comparison between local and remote copies.
+
+## Parallel Transfer Design
+
+- Upload and download phases are executed with a thread pool (`max_workers=4`).
+- Dry-run behavior is unchanged: actions are printed, no file writes occur.
+- Existing single `SSHConnection` lifecycle is preserved: one SSH client + one SFTP session are reused across operations.
+- Progress display remains per-file and is still shown during active transfers.
 
 ## Ignore Patterns
 
@@ -339,7 +361,17 @@ Behavior summary:
 
 ## Conflict Resolution
 
-When both local and remote versions changed (or mtimes tie without baseline), interactive options are shown:
+When both local and remote versions changed (or mtimes tie without baseline), resolution supports both policy mode and interactive mode.
+
+`--conflict-policy` values:
+
+- `interactive` (default): show menu and ask per conflict
+- `remote`: always choose remote version (download)
+- `local`: always choose local version (upload)
+- `newer`: choose by newer mtime; if mtimes are equal, skip
+- `skip`: skip all conflicts
+
+In interactive mode, options are:
 
 1. Use remote version (download)
 2. Use local version (upload)
@@ -363,6 +395,14 @@ Details:
 - In `dry-run`, planned deletions are printed as `- delete <path>`.
 
 Use with caution because it is intentionally destructive.
+
+## Symlink Support (`--copy-links`)
+
+- Default behavior: symlinks are skipped during scan.
+- With `--copy-links` enabled:
+  - symlinks to regular files are followed
+  - transfer copies file bytes, not link objects
+  - directory symlinks remain skipped
 
 ## Statistics Output
 

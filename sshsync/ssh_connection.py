@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import logging
+import socket
+import time
 from pathlib import Path
 
 import paramiko
@@ -78,21 +80,38 @@ class SSHConnection:
             pkey = paramiko.PKey.from_path(str(key_path))
 
         LOGGER.debug("Connecting SSH to %s:%s", self.host, self.port)
-        try:
-            client.connect(
-                hostname=self.host,
-                port=self.port,
-                username=self.username,
-                password=self.password,
-                pkey=pkey,
-                allow_agent=self.use_agent,
-                look_for_keys=self.use_agent,
-                timeout=self.timeout,
-            )
-        except paramiko.BadHostKeyException as exc:
-            raise RuntimeError(f"Host key verification failed for {self.host}:{self.port}") from exc
-        except paramiko.SSHException as exc:
-            raise RuntimeError(f"SSH connection failed for {self.host}:{self.port}: {exc}") from exc
+        retries = 3
+        backoffs = (2, 4, 8)
+        attempts = retries + 1
+        for attempt in range(attempts):
+            try:
+                client.connect(
+                    hostname=self.host,
+                    port=self.port,
+                    username=self.username,
+                    password=self.password,
+                    pkey=pkey,
+                    allow_agent=self.use_agent,
+                    look_for_keys=self.use_agent,
+                    timeout=self.timeout,
+                )
+                break
+            except paramiko.BadHostKeyException as exc:
+                raise RuntimeError(f"Host key verification failed for {self.host}:{self.port}") from exc
+            except (paramiko.SSHException, socket.error, TimeoutError, OSError) as exc:
+                if attempt == attempts - 1:
+                    raise RuntimeError(f"SSH connection failed for {self.host}:{self.port}: {exc}") from exc
+                backoff = backoffs[attempt]
+                LOGGER.warning(
+                    "SSH connect attempt %s/%s failed for %s:%s: %s; retrying in %ss",
+                    attempt + 1,
+                    attempts,
+                    self.host,
+                    self.port,
+                    exc,
+                    backoff,
+                )
+                time.sleep(backoff)
 
         self.client = client
         self.sftp = client.open_sftp()

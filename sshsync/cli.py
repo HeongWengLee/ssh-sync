@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import logging
 from pathlib import Path
-from typing import Optional
+from typing import Literal, Optional
 
 import typer
 from rich.console import Console
@@ -150,6 +150,9 @@ def _run_mode(
     remote_dir: Optional[str],
     use_hash: bool,
     delete_missing: bool,
+    copy_links: bool,
+    conflict_policy: Literal["interactive", "remote", "local", "newer", "skip"],
+    verify: bool,
     dry_run: bool,
     verbose: bool,
 ) -> None:
@@ -184,6 +187,9 @@ def _run_mode(
             use_hash=cfg.options.use_hash,
             dry_run=dry_run,
             delete_missing=delete_missing,
+            copy_links=copy_links,
+            conflict_policy=conflict_policy,
+            verify=verify,
             console=console,
         )
 
@@ -218,6 +224,13 @@ common_options = {
     "remote_dir": typer.Option(None, "--remote-dir", help="Remote directory path."),
     "use_hash": typer.Option(False, "--use-hash", help="Use SHA256 verification."),
     "delete_missing": typer.Option(False, "--delete", help="Delete files that exist only on one side."),
+    "copy_links": typer.Option(False, "--copy-links", help="Follow symlinks and copy target file contents."),
+    "conflict_policy": typer.Option(
+        "interactive",
+        "--conflict-policy",
+        help="Conflict strategy: interactive, remote, local, newer, skip.",
+    ),
+    "verify": typer.Option(False, "--verify", help="Verify transferred files with end-to-end SHA256 checksums."),
     "dry_run": typer.Option(False, "--dry-run", help="Show actions without transfer."),
     "verbose": typer.Option(False, "--verbose", help="Enable debug logs."),
 }
@@ -236,6 +249,9 @@ def pull(
     remote_dir: Optional[str] = common_options["remote_dir"],
     use_hash: bool = common_options["use_hash"],
     delete_missing: bool = common_options["delete_missing"],
+    copy_links: bool = common_options["copy_links"],
+    conflict_policy: Literal["interactive", "remote", "local", "newer", "skip"] = common_options["conflict_policy"],
+    verify: bool = common_options["verify"],
     dry_run: bool = common_options["dry_run"],
     verbose: bool = common_options["verbose"],
 ) -> None:
@@ -253,6 +269,9 @@ def pull(
         remote_dir,
         use_hash,
         delete_missing,
+        copy_links,
+        conflict_policy,
+        verify,
         dry_run,
         verbose,
     )
@@ -271,6 +290,9 @@ def push(
     remote_dir: Optional[str] = common_options["remote_dir"],
     use_hash: bool = common_options["use_hash"],
     delete_missing: bool = common_options["delete_missing"],
+    copy_links: bool = common_options["copy_links"],
+    conflict_policy: Literal["interactive", "remote", "local", "newer", "skip"] = common_options["conflict_policy"],
+    verify: bool = common_options["verify"],
     dry_run: bool = common_options["dry_run"],
     verbose: bool = common_options["verbose"],
 ) -> None:
@@ -288,6 +310,9 @@ def push(
         remote_dir,
         use_hash,
         delete_missing,
+        copy_links,
+        conflict_policy,
+        verify,
         dry_run,
         verbose,
     )
@@ -306,6 +331,9 @@ def sync(
     remote_dir: Optional[str] = common_options["remote_dir"],
     use_hash: bool = common_options["use_hash"],
     delete_missing: bool = common_options["delete_missing"],
+    copy_links: bool = common_options["copy_links"],
+    conflict_policy: Literal["interactive", "remote", "local", "newer", "skip"] = common_options["conflict_policy"],
+    verify: bool = common_options["verify"],
     dry_run: bool = common_options["dry_run"],
     verbose: bool = common_options["verbose"],
 ) -> None:
@@ -323,6 +351,9 @@ def sync(
         remote_dir,
         use_hash,
         delete_missing,
+        copy_links,
+        conflict_policy,
+        verify,
         dry_run,
         verbose,
     )

@@ -70,6 +70,7 @@ def scan_local_tree(
     local_root: Path,
     use_hash: bool,
     ignore_patterns: list[str],
+    copy_links: bool = False,
 ) -> tuple[dict[PurePosixPath, FileMetadata], ScanSummary]:
     """Recursively scan local tree and return metadata map and scan summary."""
     result: dict[PurePosixPath, FileMetadata] = {}
@@ -87,7 +88,14 @@ def scan_local_tree(
                 summary.ignored_files += 1
                 continue
             pruned_dirs.append(name)
-            result[rel] = FileMetadata(relative_path=rel, kind="directory", size=0, mtime=(current_path / name).stat().st_mtime)
+            dir_stat = (current_path / name).stat()
+            result[rel] = FileMetadata(
+                relative_path=rel,
+                kind="directory",
+                size=0,
+                mtime=dir_stat.st_mtime,
+                mode=dir_stat.st_mode,
+            )
         dirnames[:] = pruned_dirs
 
         for filename in filenames:
@@ -105,8 +113,34 @@ def scan_local_tree(
                 continue
             st = full.lstat()
             if stat.S_ISLNK(st.st_mode):
-                LOGGER.warning("Skipping local symlink: %s", rel.as_posix())
-                summary.ignored_files += 1
+                if not copy_links:
+                    LOGGER.warning("Skipping local symlink: %s", rel.as_posix())
+                    summary.ignored_files += 1
+                    continue
+                try:
+                    resolved = full.resolve(strict=True)
+                    st = resolved.stat()
+                except OSError as exc:
+                    LOGGER.warning("Skipping broken local symlink %s: %s", rel.as_posix(), exc)
+                    summary.ignored_files += 1
+                    continue
+                if stat.S_ISDIR(st.st_mode):
+                    LOGGER.warning("Skipping local symlink-to-directory: %s", rel.as_posix())
+                    summary.ignored_files += 1
+                    continue
+                if not stat.S_ISREG(st.st_mode):
+                    LOGGER.warning("Skipping non-file local symlink target: %s", rel.as_posix())
+                    summary.ignored_files += 1
+                    continue
+                digest = sha256_file(resolved) if use_hash else None
+                result[rel] = FileMetadata(
+                    relative_path=rel,
+                    kind="file",
+                    size=st.st_size,
+                    mtime=st.st_mtime,
+                    mode=st.st_mode,
+                    sha256=digest,
+                )
                 continue
             digest = sha256_file(full) if use_hash else None
             result[rel] = FileMetadata(
@@ -114,6 +148,7 @@ def scan_local_tree(
                 kind="file",
                 size=st.st_size,
                 mtime=st.st_mtime,
+                mode=st.st_mode,
                 sha256=digest,
             )
 
@@ -125,6 +160,7 @@ def scan_remote_tree(
     remote_root: str,
     use_hash: bool,
     ignore_patterns: list[str],
+    copy_links: bool = False,
 ) -> tuple[dict[PurePosixPath, FileMetadata], ScanSummary]:
     """Recursively scan remote tree over SFTP and return metadata map and scan summary."""
     if connection.sftp is None:
@@ -159,12 +195,50 @@ def scan_remote_tree(
                 continue
 
             if stat.S_ISLNK(attr.st_mode):
-                LOGGER.warning("Skipping remote symlink: %s", remote_path)
-                summary.ignored_files += 1
+                if not copy_links:
+                    LOGGER.warning("Skipping remote symlink: %s", remote_path)
+                    summary.ignored_files += 1
+                    continue
+                try:
+                    target_attr = sftp.stat(remote_path)
+                except OSError as exc:
+                    LOGGER.warning("Skipping broken remote symlink %s: %s", remote_path, exc)
+                    summary.ignored_files += 1
+                    continue
+                if stat.S_ISDIR(target_attr.st_mode):
+                    LOGGER.warning("Skipping remote symlink-to-directory: %s", remote_path)
+                    summary.ignored_files += 1
+                    continue
+                if not stat.S_ISREG(target_attr.st_mode):
+                    LOGGER.warning("Skipping non-file remote symlink target: %s", remote_path)
+                    summary.ignored_files += 1
+                    continue
+
+                summary.scanned_files += 1
+                digest = None
+                if use_hash:
+                    digest = _remote_sha256(connection, remote_path)
+                    if digest is None:
+                        LOGGER.warning("Remote hash failed for %s", remote_path)
+
+                result[rel] = FileMetadata(
+                    relative_path=rel,
+                    kind="file",
+                    size=int(target_attr.st_size),
+                    mtime=float(target_attr.st_mtime),
+                    mode=int(target_attr.st_mode),
+                    sha256=digest,
+                )
                 continue
 
             if stat.S_ISDIR(attr.st_mode):
-                result[rel] = FileMetadata(relative_path=rel, kind="directory", size=0, mtime=float(attr.st_mtime))
+                result[rel] = FileMetadata(
+                    relative_path=rel,
+                    kind="directory",
+                    size=0,
+                    mtime=float(attr.st_mtime),
+                    mode=int(attr.st_mode),
+                )
                 stack.append(remote_path)
             elif stat.S_ISREG(attr.st_mode):
                 summary.scanned_files += 1
@@ -179,6 +253,7 @@ def scan_remote_tree(
                     kind="file",
                     size=int(attr.st_size),
                     mtime=float(attr.st_mtime),
+                    mode=int(attr.st_mode),
                     sha256=digest,
                 )
 
