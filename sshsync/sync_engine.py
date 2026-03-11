@@ -10,6 +10,7 @@ import math
 import posixpath
 import shutil
 import time
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
 
@@ -282,7 +283,7 @@ class SyncEngine:
         if self.dry_run or not items:
             return
 
-        with concurrent.futures.ThreadPoolExecutor(max_workers=4) as executor:
+        with ThreadPoolExecutor(max_workers=4) as executor:
             future_to_path = {
                 executor.submit(
                     download_file,
@@ -315,7 +316,7 @@ class SyncEngine:
         if self.dry_run or not items:
             return
 
-        with concurrent.futures.ThreadPoolExecutor(max_workers=4) as executor:
+        with ThreadPoolExecutor(max_workers=4) as executor:
             future_to_path = {
                 executor.submit(
                     upload_file,

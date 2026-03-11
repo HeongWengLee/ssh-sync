@@ -104,6 +104,7 @@ def download_file(
     sftp = connection.sftp
     remote_path = posixpath.join(remote_root.rstrip("/"), relative_path.as_posix())
     local_path = local_root / Path(relative_path.as_posix())
+    tmp_path = local_path.with_name(f"{local_path.name}.tmp")
 
     if dry_run:
         return
@@ -111,11 +112,11 @@ def download_file(
     ensure_parent(local_path)
     remote_stat = sftp.stat(remote_path)
     remote_size = int(remote_stat.st_size)
-    existing_size = local_path.stat().st_size if local_path.exists() else 0
+    existing_size = tmp_path.stat().st_size if tmp_path.exists() else 0
     resume = existing_size <= remote_size
 
     if resume and existing_size > 0:
-        local_prefix = _sha256_prefix_local(local_path)
+        local_prefix = _sha256_prefix_local(tmp_path)
         remote_prefix = _sha256_prefix_remote(sftp, remote_path)
         if local_prefix != remote_prefix:
             resume = False
@@ -123,30 +124,37 @@ def download_file(
     offset = existing_size if resume else 0
     mode = "ab" if offset > 0 else "wb"
 
-    with _progress() as progress:
-        task = progress.add_task(f"Downloading {relative_path.as_posix()}", total=remote_size)
-        progress.update(task, completed=offset)
+    try:
+        with _progress() as progress:
+            task = progress.add_task(f"Downloading {relative_path.as_posix()}", total=remote_size)
+            progress.update(task, completed=offset)
 
-        with sftp.open(remote_path, "rb") as r_handle:
-            with local_path.open(mode) as l_handle:
-                if offset > 0:
-                    r_handle.seek(offset)
-                while True:
-                    chunk = r_handle.read(1024 * 1024)
-                    if not chunk:
-                        break
-                    l_handle.write(chunk)
-                    progress.advance(task, len(chunk))
+            with sftp.open(remote_path, "rb") as r_handle:
+                with tmp_path.open(mode) as l_handle:
+                    if offset > 0:
+                        r_handle.seek(offset)
+                    while True:
+                        chunk = r_handle.read(1024 * 1024)
+                        if not chunk:
+                            break
+                        l_handle.write(chunk)
+                        progress.advance(task, len(chunk))
 
-    os.chmod(local_path, int(remote_stat.st_mode) & 0o7777)
-    if verify:
-        local_digest = _sha256_full_local(local_path)
-        remote_digest = _sha256_full_remote(sftp, remote_path)
-        if local_digest != remote_digest:
-            raise RuntimeError(
-                f"Checksum mismatch for downloaded file {relative_path.as_posix()} "
-                f"(local={local_digest}, remote={remote_digest})"
-            )
+        if verify:
+            local_digest = _sha256_full_local(tmp_path)
+            remote_digest = _sha256_full_remote(sftp, remote_path)
+            if local_digest != remote_digest:
+                raise RuntimeError(
+                    f"Checksum mismatch for downloaded file {relative_path.as_posix()} "
+                    f"(local={local_digest}, remote={remote_digest})"
+                )
+
+        os.replace(tmp_path, local_path)
+        os.chmod(local_path, int(remote_stat.st_mode) & 0o7777)
+    except Exception:
+        if tmp_path.exists():
+            tmp_path.unlink()
+        raise
 
 
 def upload_file(

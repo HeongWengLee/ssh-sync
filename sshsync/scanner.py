@@ -83,18 +83,31 @@ def scan_local_tree(
         # Prune ignored directories
         pruned_dirs: list[str] = []
         for name in dirnames:
-            rel = normalize_relative_path(current_path / name, root)
+            full_dir = current_path / name
+            rel = normalize_relative_path(full_dir, root)
             if match_ignore_patterns(rel, ignore_patterns):
                 summary.ignored_files += 1
                 continue
+
+            try:
+                dir_lstat = full_dir.lstat()
+            except OSError as exc:
+                LOGGER.warning("Skipping unreadable local directory %s: %s", rel.as_posix(), exc)
+                summary.ignored_files += 1
+                continue
+
+            if stat.S_ISLNK(dir_lstat.st_mode):
+                LOGGER.warning("Skipping local symlink-to-directory: %s", rel.as_posix())
+                summary.ignored_files += 1
+                continue
+
             pruned_dirs.append(name)
-            dir_stat = (current_path / name).stat()
             result[rel] = FileMetadata(
                 relative_path=rel,
                 kind="directory",
                 size=0,
-                mtime=dir_stat.st_mtime,
-                mode=dir_stat.st_mode,
+                mtime=dir_lstat.st_mtime,
+                mode=dir_lstat.st_mode,
             )
         dirnames[:] = pruned_dirs
 
