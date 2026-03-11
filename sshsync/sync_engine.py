@@ -283,7 +283,7 @@ class SyncEngine:
         if self.dry_run or not items:
             return
 
-        with ThreadPoolExecutor(max_workers=4) as executor:
+        with ThreadPoolExecutor(max_workers=1) as executor:
             future_to_path = {
                 executor.submit(
                     download_file,
@@ -316,7 +316,7 @@ class SyncEngine:
         if self.dry_run or not items:
             return
 
-        with ThreadPoolExecutor(max_workers=4) as executor:
+        with ThreadPoolExecutor(max_workers=1) as executor:
             future_to_path = {
                 executor.submit(
                     upload_file,

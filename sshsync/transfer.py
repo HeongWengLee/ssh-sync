@@ -180,7 +180,7 @@ def upload_file(
     if dry_run:
         return
 
-    _ensure_remote_dirs(sftp, remote_path)
+    #_ensure_remote_dirs(sftp, remote_path)
 
     local_size = os.path.getsize(source_path)
     try:
