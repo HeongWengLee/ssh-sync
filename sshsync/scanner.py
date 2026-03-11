@@ -196,6 +196,11 @@ def scan_remote_tree(
         for attr in attrs:
             remote_path = posixpath.join(current, attr.filename)
             rel_str = posixpath.relpath(remote_path, normalized_root)
+            
+            # prevent path escape
+            if rel_str.startswith(".."):
+                continue
+
             rel = PurePosixPath(rel_str)
 
             if rel_str == ".":
